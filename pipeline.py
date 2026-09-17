@@ -234,11 +234,24 @@ Output STRICT JSON:
         f"the items are as follows: {items_str}, and the total amount is {total}."
     )
 
-    # Translation to Hindi
-    prompt_hi = f"""Translate this English sentence into natural Hindi in Devanagari script.
-Return ONLY the Hindi sentence.
+    prompt_hi = f"""You are a professional English-to-Hindi translator.
+Translate the following English receipt summary into formal Hindi using ONLY pure Devanagari script (क, ख, ग, घ).
 
-Sentence: {english_summary}"""
+CRITICAL RULES:
+- Do NOT use Gujarati script.
+- Do NOT use Latin/English alphabet.
+- Output ONLY the translated Devanagari sentence.
+
+Example Input:
+The bill is from Domino's, the bill states total 2 item(s) were bought, the items are as follows: Pizza, Coke, and the total amount is 450.0.
+
+Example Output:
+यह बिल डोमिनोज़ का है, कुल 2 वस्तुएं खरीदी गईं: पिज़्ज़ा, कोक, और कुल देय राशि 450.0 रुपये है।
+
+Sentence to Translate:
+{english_summary}
+
+Hindi Translation:"""
 
     hindi_summary = "विवरण उपलब्ध नहीं है।"
     try:
