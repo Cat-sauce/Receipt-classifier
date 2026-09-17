@@ -12,6 +12,7 @@ OLLAMA_ENDPOINT = "http://localhost:11434/api/generate"
 MODEL_NAME = "llama3.2:3b"
 
 def preprocess_image(image_path: str):
+    """Production pipeline for uploaded/scanned files: Red channel isolation + CLAHE + Otsu."""
     img = cv2.imread(image_path)
     if img is None:
         raise FileNotFoundError(f"Could not open image: {image_path}")
@@ -33,6 +34,40 @@ def preprocess_image(image_path: str):
     _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     # 6. Light 2x2 morphological open to eliminate stray single-pixel dust/speckles
+    clean_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, clean_kernel)
+
+    return cleaned
+
+def preprocess_camera_image(image_path: str):
+    """Dedicated pipeline for webcam/live-camera captures to handle lens blur and poor lighting."""
+    img = cv2.imread(image_path)
+    if img is None:
+        raise FileNotFoundError(f"Could not open image: {image_path}")
+
+    # 1. Standard grayscale conversion
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+
+    # 2. Add generous white border to avoid edge cropping
+    padded = cv2.copyMakeBorder(gray, 40, 40, 40, 40, cv2.BORDER_CONSTANT, value=[255])
+
+    # 3. 2x cubic upscale
+    scaled = cv2.resize(padded, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+
+    # 4. Unsharp masking to counteract fixed-focus webcam blur
+    gaussian = cv2.GaussianBlur(scaled, (0, 0), 2.0)
+    sharpened = cv2.addWeighted(scaled, 1.5, gaussian, -0.5, 0)
+
+    # 5. CLAHE for dynamic ambient lighting
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    enhanced = clahe.apply(sharpened)
+
+    # 6. Adaptive Gaussian thresholding to handle uneven shadows across paper
+    thresh = cv2.adaptiveThreshold(
+        enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 25, 11
+    )
+
+    # 7. Light cleaning kernel to suppress single-pixel noise
     clean_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
     cleaned = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, clean_kernel)
 
@@ -100,6 +135,22 @@ def clean_ocr_text(text: str) -> str:
 
 def extract_and_summarize(ocr_text: str) -> dict:
     cleaned_text = clean_ocr_text(ocr_text)
+
+    # Guard: Do not call Ollama if OCR produced no legible alphanumeric characters
+    alphanumeric_chars = re.findall(r'[a-zA-Z0-9]', cleaned_text)
+    if not cleaned_text or len(alphanumeric_chars) < 8:
+        return {
+            "merchant": "Unreadable Receipt",
+            "items": [],
+            "total_items_count": 0,
+            "date": "N/A",
+            "total": 0.0,
+            "category": "Other",
+            "contact_info": "N/A",
+            "return_policy": "Not stated",
+            "english_summary": "The receipt image was too blurry, dark, or out of focus to read. Please rescan with better lighting and focus.",
+            "hindi_summary": "रसीद की तस्वीर बहुत धुंधली थी। कृपया बेहतर रोशनी और फोकस के साथ दोबारा स्कैन करें।"
+        }
 
     prompt_extract = f"""You are a commercial receipt data extractor.
 Extract structured metadata strictly from the raw receipt text.
