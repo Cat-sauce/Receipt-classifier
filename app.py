@@ -1,6 +1,7 @@
 import streamlit as st
 from gtts import gTTS
 import os
+import datetime
 import pipeline
 import database
 import requests
@@ -11,7 +12,7 @@ database.init_db()
 AUDIO_DIR = "static_audio"
 os.makedirs(AUDIO_DIR, exist_ok=True)
 
-st.title("🧾 Smart Receipt Classifier & Audio Digest")
+st.title("Receipt IoT System: Smart Classifier & Audio Digest")
 
 def ensure_hindi_translation(english_text: str) -> str:
     if not english_text or not english_text.strip():
@@ -33,36 +34,91 @@ Sentence: {english_text}"""
     except Exception:
         return "विवरण उपलब्ध नहीं है।"
 
+def execute_pipeline(image_path: str, filename: str, is_camera: bool = False):
+    """Executes optical processing, OCR, schema extraction, and database persistence."""
+    with st.spinner("Processing image & Running OCR..."):
+        if is_camera:
+            processed = pipeline.preprocess_camera_image(image_path)
+        else:
+            processed = pipeline.preprocess_image(image_path)
+            
+        ocr_text = pipeline.run_ocr(processed)
+
+    # If OCR is empty or insufficient, generate a graceful placeholder record instead of halting
+    if not ocr_text or len(ocr_text.strip()) < 8:
+        st.warning("Could not clearly read text from this image due to low camera quality, shadows, or blur.")
+        
+        fallback_record = {
+            "merchant": "Unreadable Receipt",
+            "items": [],
+            "total_items_count": 0,
+            "date": "N/A",
+            "total": 0.0,
+            "category": "Other",
+            "contact_info": "N/A",
+            "return_policy": "Not stated",
+            "english_summary": "Could not read OCR text from image due to low camera quality, shadows, or blur.",
+            "hindi_summary": "कम रोशनी, छाया या धुंधलेपन के कारण रसीद से विवरण नहीं पढ़ा जा सका।",
+            "filename": filename,
+            "raw_text": "No legible text detected."
+        }
+        
+        database.insert_receipt(fallback_record)
+        st.info("Saved an unreadable receipt record to database for auditing.")
+        return
+
+    with st.spinner("Extracting metadata, line items, and summaries..."):
+        extracted = pipeline.extract_and_summarize(ocr_text)
+        
+        if not extracted.get("hindi_summary") or not extracted["hindi_summary"].strip():
+            extracted["hindi_summary"] = ensure_hindi_translation(extracted.get("english_summary", ""))
+
+        extracted["filename"] = filename
+        extracted["raw_text"] = ocr_text
+        database.insert_receipt(extracted)
+
+    st.success(f"Successfully processed {filename} and saved to database!")
+    
 # Sidebar Controls
 with st.sidebar:
-    st.header("Upload New Receipt")
-    uploaded = st.file_uploader("Select Receipt Image", type=["jpg", "jpeg", "png"])
+    st.header("Input Receipt")
     
-    if uploaded and st.button("Process & Classify"):
-        temp_img = os.path.join("temp_" + uploaded.name)
-        with open(temp_img, "wb") as f:
-            f.write(uploaded.getbuffer())
+    input_mode = st.radio("Choose Input Method:", ["📸 Laptop Webcam", "📁 Upload Image File"])
 
-        with st.spinner("Enhancing image with OpenCV & Running OCR..."):
-            processed = pipeline.preprocess_image(temp_img)
-            ocr_text = pipeline.run_ocr(processed)
+    # Mode 1: Laptop Webcam
+    if input_mode == "📸 Laptop Webcam":
+        camera_photo = st.camera_input("Hold the bill steady (25-30 cm from camera):")
+        
+        if camera_photo is not None:
+            if st.button("Process Webcam Scan", use_container_width=True):
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                temp_filename = f"webcam_{timestamp}.jpg"
+                
+                with open(temp_filename, "wb") as f:
+                    f.write(camera_photo.getbuffer())
 
-        with st.spinner("Extracting metadata, line items, and summaries..."):
-            extracted = pipeline.extract_and_summarize(ocr_text)
-            
-            if not extracted.get("hindi_summary") or not extracted["hindi_summary"].strip():
-                extracted["hindi_summary"] = ensure_hindi_translation(extracted.get("english_summary", ""))
+                execute_pipeline(temp_filename, temp_filename, is_camera=True)
 
-            extracted["filename"] = uploaded.name
-            extracted["raw_text"] = ocr_text
-            database.insert_receipt(extracted)
+                if os.path.exists(temp_filename):
+                    os.remove(temp_filename)
+                st.rerun()
 
-        st.success("Successfully processed and saved to database!")
-        if os.path.exists(temp_img):
-            os.remove(temp_img)
+    # Mode 2: Uploaded File
+    else:
+        uploaded = st.file_uploader("Select Receipt Image", type=["jpg", "jpeg", "png"])
+        if uploaded and st.button("Process Uploaded File", use_container_width=True):
+            temp_img = os.path.join("temp_" + uploaded.name)
+            with open(temp_img, "wb") as f:
+                f.write(uploaded.getbuffer())
+
+            execute_pipeline(temp_img, uploaded.name, is_camera=False)
+
+            if os.path.exists(temp_img):
+                os.remove(temp_img)
+            st.rerun()
 
     st.divider()
-    if st.button("🗑️ Clear All Saved Receipts"):
+    if st.button("🗑️ Clear All Saved Receipts", use_container_width=True):
         database.clear_all_records()
         st.success("Database cleared!")
         st.rerun()
@@ -82,7 +138,7 @@ with filter_col2:
 records = database.fetch_records(search, selected_cat)
 
 if not records:
-    st.info("No receipts found. Upload an image from the sidebar to begin.")
+    st.info("No receipts found. Scan a bill via webcam or upload an image to begin.")
 else:
     for rec in records:
         rec_id, filename, merchant, r_date, total, cat, en_sum, hi_sum, contact_info, return_policy, raw_text = rec
@@ -103,10 +159,9 @@ else:
             st.markdown(f"**English Summary:** {en_sum}")
             st.markdown(f"**Hindi Summary:** {hi_sum}")
             
-            # Audio Section
+            # Audio Digest Controls
             c_audio1, c_audio2 = st.columns(2)
             
-            # English Audio
             with c_audio1:
                 en_path = os.path.join(AUDIO_DIR, f"en_{rec_id}.mp3")
                 if not os.path.exists(en_path):
@@ -119,7 +174,6 @@ else:
                     st.write("English Playback:")
                     st.audio(en_path)
 
-            # Hindi Audio
             with c_audio2:
                 hi_path = os.path.join(AUDIO_DIR, f"hi_{rec_id}.mp3")
                 if not os.path.exists(hi_path):
@@ -134,7 +188,7 @@ else:
 
             st.divider()
 
-            # Interactive Receipt Q&A
+            # Interactive In-Context Q&A
             st.markdown("### 💬 Ask Questions About This Receipt")
             q_col1, q_col2 = st.columns([4, 1])
             with q_col1:
@@ -150,6 +204,5 @@ else:
                     answer = pipeline.ask_receipt_question(raw_text, user_query)
                     st.info(f"**Answer:** {answer}")
 
-            # Debug Expander
             with st.expander("🔍 View Raw OCR Text"):
                 st.code(raw_text)
