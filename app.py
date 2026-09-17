@@ -6,6 +6,8 @@ import pipeline
 import database
 import requests
 
+PI_IP = "192.168.1.50"  # Replace with your Pi's actual Wi-Fi IP address
+
 st.set_page_config(page_title="Receipt IoT System", layout="wide")
 database.init_db()
 
@@ -18,14 +20,21 @@ def ensure_hindi_translation(english_text: str) -> str:
     if not english_text or not english_text.strip():
         return "विवरण उपलब्ध नहीं है।"
     
-    prompt = f"""Translate this single sentence into natural Hindi using Devanagari script.
-Return ONLY the Hindi translation and nothing else.
+    prompt = f"""Translate this English receipt summary into Hindi using pure Devanagari script (क, ख, ग, घ).
+Do NOT use Gujarati or any other script. Return ONLY the Hindi text.
 
-Sentence: {english_text}"""
+Sentence: {english_text}
+
+Hindi Translation:"""
     try:
         res = requests.post(
             pipeline.OLLAMA_ENDPOINT,
-            json={"model": pipeline.MODEL_NAME, "prompt": prompt, "stream": False},
+            json={
+                "model": pipeline.MODEL_NAME, 
+                "prompt": prompt, 
+                "stream": False,
+                "options": {"temperature": 0.0}
+            },
             timeout=30
         )
         res.raise_for_status()
@@ -33,7 +42,7 @@ Sentence: {english_text}"""
         return translated if translated else "विवरण उपलब्ध नहीं है।"
     except Exception:
         return "विवरण उपलब्ध नहीं है।"
-
+    
 def execute_pipeline(image_path: str, filename: str, is_camera: bool = False):
     """Executes optical processing, OCR, schema extraction, and database persistence."""
     with st.spinner("Processing image & Running OCR..."):
@@ -78,15 +87,44 @@ def execute_pipeline(image_path: str, filename: str, is_camera: bool = False):
         database.insert_receipt(extracted)
 
     st.success(f"Successfully processed {filename} and saved to database!")
-    
+
 # Sidebar Controls
 with st.sidebar:
     st.header("Input Receipt")
     
-    input_mode = st.radio("Choose Input Method:", ["📸 Laptop Webcam", "📁 Upload Image File"])
+    # All 3 options included here
+    input_mode = st.radio(
+        "Choose Input Method:", 
+        ["📷 Raspberry Pi Camera", "📸 Laptop Webcam", "📁 Upload Image File"]
+    )
 
-    # Mode 1: Laptop Webcam
-    if input_mode == "📸 Laptop Webcam":
+    # Mode 1: Remote Trigger on Raspberry Pi
+    if input_mode == "📷 Raspberry Pi Camera":
+        st.caption(f"Targeting Pi at: `{PI_IP}:5000`")
+        if st.button("Trigger Pi Camera Capture", use_container_width=True):
+            try:
+                with st.spinner("Requesting Pi camera capture over Wi-Fi..."):
+                    response = requests.get(f"http://{PI_IP}:5000/capture", timeout=12)
+                
+                if response.status_code == 200:
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    pi_filename = f"pi_cam_{timestamp}.jpg"
+                    
+                    with open(pi_filename, "wb") as f:
+                        f.write(response.content)
+                    
+                    execute_pipeline(pi_filename, pi_filename, is_camera=True)
+                    
+                    if os.path.exists(pi_filename):
+                        os.remove(pi_filename)
+                    st.rerun()
+                else:
+                    st.error(f"Pi returned status code {response.status_code}")
+            except Exception as e:
+                st.error(f"Failed to reach Pi Camera: {e}")
+
+    # Mode 2: Laptop Webcam
+    elif input_mode == "📸 Laptop Webcam":
         camera_photo = st.camera_input("Hold the bill steady (25-30 cm from camera):")
         
         if camera_photo is not None:
@@ -103,8 +141,8 @@ with st.sidebar:
                     os.remove(temp_filename)
                 st.rerun()
 
-    # Mode 2: Uploaded File
-    else:
+    # Mode 3: Uploaded File
+    elif input_mode == "📁 Upload Image File":
         uploaded = st.file_uploader("Select Receipt Image", type=["jpg", "jpeg", "png"])
         if uploaded and st.button("Process Uploaded File", use_container_width=True):
             temp_img = os.path.join("temp_" + uploaded.name)
